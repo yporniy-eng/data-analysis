@@ -56,7 +56,7 @@ with st.sidebar:
         index=0,
     )
 
-    days_back = st.slider("Дней истории", 7, 365, 30, 7)
+    days_back = st.slider("Дней истории", 7, 365, 28, 7)
 
     st.divider()
 
@@ -229,28 +229,36 @@ def run_full_analysis():
                     f"Объём: ${cluster['total_value']:,.0f}"
                 )
     else:
-        st.info("Кластеры ликвидности не обнаружены в диапазоне ±5%")
+        st.info(
+            "⚠️ Кластеры ликвидности не обнаружены в диапазоне ±5%. "
+            "График всё равно отображается ниже."
+        )
 
     # ---- Price chart ----
     st.subheader("📈 График цены")
-    chart_h = st.session_state.get("chart_height", 700)
-    fig = build_price_chart(ohlcv, clusters, current_price, chart_height=chart_h)
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-        key="price_chart",
-        config={
-            "scrollZoom": True,
-            "displayModeBar": True,
-            "modeBarButtonsToAdd": [
-                "drawline",
-                "drawopenpath",
-                "drawcircle",
-                "drawrect",
-                "eraseshape",
-            ],
-        },
+    st.caption(
+        "🖱️ Скролл = zoom | Перетаскивание = перемещение | "
+        "Тулбар сверху = линии, сброс, скриншот"
     )
+    with st.spinner("Построение графика..."):
+        chart_h = st.session_state.get("chart_height", 700)
+        fig = build_price_chart(ohlcv, clusters, current_price, chart_height=chart_h)
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            key="price_chart",
+            config={
+                "scrollZoom": True,
+                "displayModeBar": True,
+                "modeBarButtonsToAdd": [
+                    "drawline",
+                    "drawopenpath",
+                    "drawcircle",
+                    "drawrect",
+                    "eraseshape",
+                ],
+            },
+        )
 
     # ---- Signal generation ----
     st.subheader("💡 Торговые сигналы")
@@ -503,22 +511,28 @@ def build_price_chart(
         xaxis_title="",
         dragmode="zoom",  # Default: scroll to zoom, drag to pan
         hovermode="x unified",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#e0e0e0"),
         xaxis=dict(
             type="date",
             showgrid=True,
             gridwidth=1,
-            gridcolor="rgba(128,128,128,0.2)",
+            gridcolor="rgba(128,128,128,0.3)",
+            zeroline=False,
         ),
         yaxis=dict(
             showgrid=True,
             gridwidth=1,
-            gridcolor="rgba(128,128,128,0.2)",
+            gridcolor="rgba(128,128,128,0.3)",
             domain=[0.25, 1.0],
+            zeroline=False,
         ),
         yaxis2=dict(
             showgrid=True,
-            gridcolor="rgba(128,128,128,0.2)",
+            gridcolor="rgba(128,128,128,0.3)",
             domain=[0.0, 0.22],
+            zeroline=False,
         ),
         modebar=dict(
             add=[

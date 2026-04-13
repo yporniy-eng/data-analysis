@@ -160,66 +160,91 @@ class DataCollector:
         limit: int = 500,
     ) -> pd.DataFrame:
         """
-        Fetch recent liquidation data.
+        Fetch or estimate liquidation data.
 
-        Note: Binance force orders are public but limited.
-        Bybit has better liquidation data via API.
-
-        Args:
-            symbol: Trading pair (e.g., 'BTCUSDT' for Binance)
-            limit: Number of records
-
-        Returns:
-            DataFrame with liquidation data
+        Since Binance removed the public forceOrders endpoint,
+        we estimate liquidations from large candle wicks:
+        - Long liquidations = long lower wicks (price dropped then recovered)
+        - Short liquidations = long upper wicks (price spiked then fell back)
         """
-        # Normalize symbol format for REST API
-        if self.exchange_name == "binance":
-            return self._fetch_binance_liquidations(symbol, limit)
-        elif self.exchange_name == "bybit":
+        # Try Bybit first (still has liquidation API)
+        if self.exchange_name == "bybit":
             return self._fetch_bybit_liquidations(symbol, limit)
+
+        # Binance: endpoint is deprecated
+        # Use price data to estimate liquidation zones
+        logger.info(
+            "Binance public liquidations endpoint removed. "
+            "Estimating from price wicks."
+        )
+
+        # Fetch recent OHLCV to estimate liquidations
+        ohlcv = self.exchange.fetch_ohlcv(symbol, "1h", limit=200)
+
+        if not ohlcv:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(
+            ohlcv,
+            columns=["timestamp", "open", "high", "low", "close", "volume"]
+        )
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+
+        # Calculate candle wicks
+        df["body"] = abs(df["close"] - df["open"])
+        df["range"] = df["high"] - df["low"]
+        df["upper_wick"] = df["high"] - df[["open", "close"]].max(axis=1)
+        df["lower_wick"] = df[["open", "close"]].min(axis=1) - df["low"]
+
+        # Find candles with unusually large wicks (> 2x median body)
+        median_body = df["body"].median()
+        threshold = median_body * 2
+
+        liquidations = []
+
+        for _, row in df.iterrows():
+            # Long liquidations (price dropped sharply, then recovered)
+            if row["lower_wick"] > threshold and row["lower_wick"] > row["body"]:
+                liquidations.append({
+                    "timestamp": row["timestamp"],
+                    "symbol": symbol,
+                    "exchange": "binance",
+                    "side": "sell",  # Longs liquidated on price drop
+                    "price": row["low"],
+                    "quantity": row["volume"],
+                    "value_usd": row["volume"] * row["low"],
+                })
+
+            # Short liquidations (price spiked, then fell back)
+            if row["upper_wick"] > threshold and row["upper_wick"] > row["body"]:
+                liquidations.append({
+                    "timestamp": row["timestamp"],
+                    "symbol": symbol,
+                    "exchange": "binance",
+                    "side": "buy",  # Shorts liquidated on price spike
+                    "price": row["high"],
+                    "quantity": row["volume"],
+                    "value_usd": row["volume"] * row["high"],
+                })
+
+        result = pd.DataFrame(liquidations)
+
+        if not result.empty:
+            logger.info(f"Estimated {len(result)} liquidation events from wicks")
+
+        return result
 
     def _fetch_binance_liquidations(
         self,
         symbol: str,
         limit: int,
     ) -> pd.DataFrame:
-        """Fetch Binance force orders (public endpoint)."""
-        # Binance symbol format: BTCUSDT
-        sym = symbol.replace("/", "").replace("USDT", "USDT")
-
-        url = "https://fapi.binance.com/fapi/v1/allForceOrders"
-        params = {"symbol": sym, "limit": limit}
-
-        try:
-            response = requests.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-        except Exception as e:
-            logger.error(f"Error fetching Binance liquidations: {e}")
-            return pd.DataFrame()
-
-        if not data:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(data)
-        df["time"] = pd.to_datetime(df["time"], unit="ms")
-        df["symbol"] = symbol
-        df["exchange"] = "binance"
-
-        df = df.rename(
-            columns={
-                "time": "timestamp",
-                "price": "price",
-                "qty": "quantity",
-                "side": "side",
-            }
+        """Deprecated: Binance removed public liquidation endpoint."""
+        logger.warning(
+            "Binance allForceOrders endpoint is deprecated. "
+            "Using wick estimation instead."
         )
-
-        if "quantity" in df.columns and "price" in df.columns:
-            df["value_usd"] = df["quantity"] * df["price"]
-
-        logger.info(f"Fetched {len(df)} Binance liquidations")
-        return df
+        return pd.DataFrame()
 
     def _fetch_bybit_liquidations(
         self,
