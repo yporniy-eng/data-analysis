@@ -6,6 +6,8 @@ Displays:
 - Current signals table
 - P&L history
 - Key metrics
+
+Data is loaded ONLY when user clicks the button (no auto-load).
 """
 
 import streamlit as st
@@ -27,7 +29,6 @@ from src.math_core.ewma import EWMACalculator
 from src.liquidations.detector import LiquidationClusterDetector
 from src.signals.generator import SignalGenerator
 from src.backtest.engine import BacktestEngine
-from src.logger import logger
 
 st.set_page_config(
     page_title="Liquidity Impulse Detector",
@@ -55,131 +56,128 @@ with st.sidebar:
         index=0,
     )
 
-    days_back = st.slider("Дней истории", 30, 365, 180, 30)
-
-    run_analysis = st.button("🚀 Запустить анализ", type="primary")
+    days_back = st.slider("Дней истории", 30, 365, 90, 30)
 
     st.divider()
+
+    # Show current BTC price (fast, single API call)
+    if st.button("📡 Проверить цену BTC", use_container_width=True):
+        with st.spinner("Запрос цены..."):
+            try:
+                c = DataCollector("binance")
+                price = c.get_current_price("BTC/USDT")
+                st.success(f"BTC = **${price:,.2f}**")
+            except Exception as e:
+                st.error(f"Ошибка: {e}")
+
+    st.divider()
+
     st.info(
-        "💡 **Совет:** Для работы нужен Docker с ClickHouse "
-        "(опционально). Без БД данные загружаются напрямую с биржи."
+        "💡 Нажмите **«Запустить анализ»** "
+        "для загрузки данных и генерации сигналов.\n\n"
+        "Данные загружаются напрямую с Binance (API ключ не нужен)."
     )
 
 
-# ---- Main logic ----
-@st.cache_data(ttl=300)
-def load_data(sym: str, tf: str, days: int) -> tuple:
-    """Load OHLCV and liquidation data."""
+# ---- Data loading (cached) ----
+@st.cache_data(ttl=600, show_spinner=False)
+def load_ohlcv_data(sym: str, tf: str, days: int) -> pd.DataFrame:
+    """Load OHLCV candlestick data."""
     collector = DataCollector(exchange_name="binance")
+    df = collector.fetch_ohlcv_history(sym, tf, days)
+    return df
 
-    # OHLCV
-    ohlcv = collector.fetch_ohlcv_history(sym, tf, days)
 
-    # Liquidations
+@st.cache_data(ttl=600, show_spinner=False)
+def load_liquidations(sym: str, limit: int = 1000) -> pd.DataFrame:
+    """Load liquidation data."""
+    collector = DataCollector(exchange_name="binance")
     sym_raw = sym.replace("/", "")
-    liqs = collector.fetch_liquidations(sym_raw, limit=1000)
+    df = collector.fetch_liquidations(sym_raw, limit=limit)
+    return df
 
-    return ohlcv, liqs
+
+# ---- Welcome screen (shown until analysis is started) ----
+if "data_loaded" not in st.session_state:
+    st.session_state.data_loaded = False
 
 
-def build_price_chart(ohlcv: pd.DataFrame, clusters: list, current_price: float):
-    """Build candlestick chart with liquidation clusters."""
-    fig = make_subplots(
-        rows=2, cols=1,
-        row_heights=[0.75, 0.25],
-        shared_xaxes=True,
-        vertical_spacing=0.03,
+def _run_analysis(symbol, timeframe, days_back):
+    """Store params and rerun to trigger analysis."""
+    st.session_state.selected_symbol = symbol
+    st.session_state.selected_timeframe = timeframe
+    st.session_state.selected_days = days_back
+    st.session_state.data_loaded = True
+    st.rerun()
+
+
+if not st.session_state.data_loaded:
+    st.markdown("---")
+
+    col1, col2 = st.columns([1, 1])
+
+    with col1:
+        st.subheader("🚀 Быстрый старт")
+        st.markdown("""
+1. Выберите инструмент в sidebar
+2. Выберите таймфрейм и глубину истории
+3. Нажмите **«Запустить анализ»**
+
+Данные загружаются с Binance (публичные API, без ключей).
+        """)
+
+        if st.button("🚀 Запустить анализ", type="primary", use_container_width=True):
+            _run_analysis(symbol, timeframe, days_back)
+
+    with col2:
+        st.subheader("📋 Что показывает приложение")
+        st.markdown("""
+- **Кластеры ликвидности** — зоны концентрации ликвидаций (ценовые магниты)
+- **График цены** — свечи + объём + линии кластеров
+- **Торговые сигналы** — CALL/PUT опционы с оценкой потенциала
+- **Анализ волатильности** — EWMA, эксцесс, скошенность
+- **Распределение доходностей** — проверка на нормальность
+- **Бэктест** — валидация стратегии на исторических данных
+        """)
+
+    st.divider()
+    st.caption(
+        "Научная основа: Bachelier · Black-Scholes-Merton · "
+        "Simons (Renaissance) · Andrew Lo · Market Microstructure"
     )
-
-    # Candlestick
-    fig.add_trace(
-        go.Candlestick(
-            x=ohlcv["timestamp"],
-            open=ohlcv["open"],
-            high=ohlcv["high"],
-            low=ohlcv["low"],
-            close=ohlcv["close"],
-            name="Price",
-        ),
-        row=1, col=1,
-    )
-
-    # Liquidation cluster lines
-    colors = {"above": "red", "below": "green"}
-    for cluster in clusters:
-        fig.add_hline(
-            y=cluster["price_center"],
-            line_dash="dash",
-            line_color=colors.get(cluster["position"], "gray"),
-            opacity=0.7,
-            row=1, col=1,
-            annotation_text=(
-                f"{'🔴' if cluster['position'] == 'above' else '🟢'} "
-                f"{cluster['distance_pct']:+.1%} | "
-                f"z={cluster['max_z_score']:.1f}"
-            ),
-            annotation_position="top left" if cluster["position"] == "above" else "bottom left",
-        )
-
-    # Volume bars
-    colors_vol = [
-        "green" if c >= o else "red"
-        for o, c in zip(ohlcv["open"], ohlcv["close"])
-    ]
-    fig.add_trace(
-        go.Bar(
-            x=ohlcv["timestamp"],
-            y=ohlcv["volume"],
-            marker_color=colors_vol,
-            name="Volume",
-            opacity=0.6,
-        ),
-        row=2, col=1,
-    )
-
-    fig.update_layout(
-        height=700,
-        xaxis_rangeslider_visible=False,
-        showlegend=False,
-        xaxis_title="",
-    )
-
-    return fig
+    st.stop()
 
 
-def build_signal_table(signals: list) -> pd.DataFrame:
-    """Format signals for display."""
-    if not signals:
-        return pd.DataFrame()
+# ---- Analysis results (shown after data is loaded) ----
+def run_full_analysis():
+    """Main analysis flow."""
+    sym = st.session_state.get("selected_symbol", "BTC/USDT")
+    tf = st.session_state.get("selected_timeframe", "1h")
+    days = st.session_state.get("selected_days", 90)
 
-    df = pd.DataFrame(signals)
-    display_cols = [
-        "signal_type", "strike", "option_type",
-        "market_price", "fair_value",
-        "profit_ratio", "composite_score",
-        "probability_of_success", "position_size",
-        "risk_usd", "reward_usd",
-    ]
-    available = [c for c in display_cols if c in df.columns]
-    return df[available]
-
-
-# ---- Run analysis ----
-if run_analysis or True:  # Auto-run on load
-    with st.spinner("Загрузка данных..."):
-        ohlcv, liqs = load_data(symbol, timeframe, days_back)
+    with st.spinner(f"Загрузка данных {sym} ({tf}, {days} дней)..."):
+        ohlcv = load_ohlcv_data(sym, tf, days)
+        liqs = load_liquidations(sym, limit=1000)
 
     if ohlcv.empty:
         st.error("Не удалось загрузить данные OHLCV")
-        st.stop()
+        st.session_state.data_loaded = False
+        return
 
     current_price = ohlcv["close"].iloc[-1]
+    prev_price = ohlcv["close"].iloc[-2] if len(ohlcv) > 1 else current_price
 
-    # Display current price
+    # Store in session state
+    st.session_state.ohlcv = ohlcv
+    st.session_state.liquidations = liqs
+    st.session_state.current_price = current_price
+    st.session_state.prev_price = prev_price
+
+    # Show header
     st.metric(
-        f"{symbol} — Текущая цена",
+        f"{sym} — Текущая цена",
         f"${current_price:,.2f}",
-        delta=f"{ohlcv['close'].iloc[-1] - ohlcv['close'].iloc[-2]:+.2f}"
+        delta=f"{current_price - prev_price:+.2f}"
     )
 
     st.divider()
@@ -190,10 +188,12 @@ if run_analysis or True:  # Auto-run on load
     liq_detector = LiquidationClusterDetector()
     clusters = liq_detector.detect_clusters(liqs, current_price)
 
+    st.session_state.clusters = clusters
+
     if clusters:
-        col1, col2, col3 = st.columns(3)
+        cols = st.columns(3)
         for i, cluster in enumerate(clusters[:6]):
-            with (col1 if i % 3 == 0 else col2 if i % 3 == 1 else col3):
+            with cols[i % 3]:
                 icon = "🔴" if cluster["position"] == "above" else "🟢"
                 st.metric(
                     f"{icon} Кластер {i + 1}",
@@ -222,8 +222,8 @@ if run_analysis or True:  # Auto-run on load
         bsm_calculator=bsm,
         ewma_calculator=ewma,
         liq_detector=liq_detector,
-        min_profit_ratio=1.5,
-        min_composite_score=0.5,
+        min_profit_ratio=1.0,
+        min_composite_score=0.3,
     )
 
     hist_prices = ohlcv["close"]
@@ -234,11 +234,13 @@ if run_analysis or True:  # Auto-run on load
         account_value=100000,
     )
 
+    st.session_state.signals = signals
+    st.session_state.generator = generator
+
     if signals:
         sig_df = build_signal_table(signals)
         st.dataframe(sig_df, use_container_width=True, hide_index=True)
 
-        # Show best signal details
         best = signals[0]
         st.success(
             f"✅ Лучший сигнал: **{best['signal_type']}** "
@@ -248,56 +250,6 @@ if run_analysis or True:  # Auto-run on load
         )
     else:
         st.info("Нет сигналов, соответствующих критериям")
-
-    # ---- Backtest ----
-    st.divider()
-    st.subheader("📊 Бэктест")
-
-    if st.button("Запустить бэктест"):
-        with st.spinner("Бэктест запущен..."):
-            engine = BacktestEngine(
-                signal_generator=generator,
-                initial_capital=100000,
-                commission_rate=0.0004,
-                stop_loss_pct=0.50,
-                max_hold_hours=48,
-            )
-
-            result = engine.run(ohlcv, liqs, symbol=symbol, step_hours=4)
-
-            metrics = result["metrics"]
-
-            col1, col2, col3, col4, col5 = st.columns(5)
-            col1.metric("Total Return", f"{metrics.get('total_return', 0):.2%}")
-            col2.metric("Sharpe", f"{metrics.get('sharpe_ratio', 0):.2f}")
-            col3.metric("Win Rate", f"{metrics.get('win_rate', 0):.2%}")
-            col4.metric("Max DD", f"{metrics.get('max_drawdown', 0):.2%}")
-            col5.metric("Trades", f"{metrics.get('total_trades', 0)}")
-
-            # Equity curve
-            if not result["equity_curve"].empty:
-                eq_df = result["equity_curve"]
-                fig_eq = go.Figure()
-                fig_eq.add_trace(
-                    go.Scatter(
-                        x=eq_df["timestamp"],
-                        y=eq_df["equity"],
-                        mode="lines",
-                        fill="tozeroy",
-                        name="Equity",
-                    )
-                )
-                fig_eq.update_layout(
-                    title="Кривая доходности",
-                    xaxis_title="Дата",
-                    yaxis_title="Equity ($)",
-                    height=400,
-                )
-                st.plotly_chart(fig_eq, use_container_width=True)
-
-            # Trades table
-            if not result["trades"].empty:
-                st.dataframe(result["trades"], use_container_width=True, hide_index=True)
 
     # ---- Volatility analysis ----
     st.divider()
@@ -366,3 +318,152 @@ if run_analysis or True:  # Auto-run on load
         height=350,
     )
     st.plotly_chart(fig_hist, use_container_width=True)
+
+    # ---- Backtest ----
+    st.divider()
+    st.subheader("📊 Бэктест")
+    st.caption("Симуляция торговли на исторических данных (комиссия 0.04%, стоп-лосс 50%)")
+
+    if st.button("▶️ Запустить бэктест"):
+        run_backtest(ohlcv, liqs, sym, generator)
+
+    # ---- Re-run button ----
+    st.divider()
+    if st.button("🔄 Обновить данные", use_container_width=True):
+        st.session_state.data_loaded = False
+        st.rerun()
+
+
+def run_backtest(ohlcv, liqs, symbol, generator):
+    """Run backtest and display results."""
+    with st.spinner("Бэктест запущен..."):
+        engine = BacktestEngine(
+            signal_generator=generator,
+            initial_capital=100000,
+            commission_rate=0.0004,
+            stop_loss_pct=0.50,
+            max_hold_hours=48,
+        )
+
+        result = engine.run(ohlcv, liqs, symbol=symbol, step_hours=4)
+
+    metrics = result["metrics"]
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Total Return", f"{metrics.get('total_return', 0):.2%}")
+    col2.metric("Sharpe", f"{metrics.get('sharpe_ratio', 0):.2f}")
+    col3.metric("Win Rate", f"{metrics.get('win_rate', 0):.2%}")
+    col4.metric("Max DD", f"{metrics.get('max_drawdown', 0):.2%}")
+    col5.metric("Trades", f"{metrics.get('total_trades', 0)}")
+
+    if not result["equity_curve"].empty:
+        eq_df = result["equity_curve"]
+        fig_eq = go.Figure()
+        fig_eq.add_trace(
+            go.Scatter(
+                x=eq_df["timestamp"],
+                y=eq_df["equity"],
+                mode="lines",
+                fill="tozeroy",
+                name="Equity",
+            )
+        )
+        fig_eq.update_layout(
+            title="Кривая доходности",
+            xaxis_title="Дата",
+            yaxis_title="Equity ($)",
+            height=400,
+        )
+        st.plotly_chart(fig_eq, use_container_width=True)
+
+    if not result["trades"].empty:
+        st.dataframe(result["trades"], use_container_width=True, hide_index=True)
+
+
+def build_price_chart(ohlcv: pd.DataFrame, clusters: list, current_price: float):
+    """Build candlestick chart with liquidation clusters."""
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.75, 0.25],
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+    )
+
+    # Candlestick
+    fig.add_trace(
+        go.Candlestick(
+            x=ohlcv["timestamp"],
+            open=ohlcv["open"],
+            high=ohlcv["high"],
+            low=ohlcv["low"],
+            close=ohlcv["close"],
+            name="Price",
+        ),
+        row=1, col=1,
+    )
+
+    # Liquidation cluster lines
+    colors_map = {"above": "red", "below": "green"}
+    for cluster in clusters:
+        fig.add_hline(
+            y=cluster["price_center"],
+            line_dash="dash",
+            line_color=colors_map.get(cluster["position"], "gray"),
+            opacity=0.7,
+            row=1, col=1,
+            annotation_text=(
+                f"{'🔴' if cluster['position'] == 'above' else '🟢'} "
+                f"{cluster['distance_pct']:+.1%} | "
+                f"z={cluster['max_z_score']:.1f}"
+            ),
+            annotation_position=(
+                "top left" if cluster["position"] == "above" else "bottom left"
+            ),
+        )
+
+    # Volume bars
+    colors_vol = [
+        "green" if c >= o else "red"
+        for o, c in zip(ohlcv["open"], ohlcv["close"])
+    ]
+    fig.add_trace(
+        go.Bar(
+            x=ohlcv["timestamp"],
+            y=ohlcv["volume"],
+            marker_color=colors_vol,
+            name="Volume",
+            opacity=0.6,
+        ),
+        row=2, col=1,
+    )
+
+    fig.update_layout(
+        height=700,
+        xaxis_rangeslider_visible=False,
+        showlegend=False,
+        xaxis_title="",
+    )
+
+    return fig
+
+
+def build_signal_table(signals: list) -> pd.DataFrame:
+    """Format signals for display."""
+    if not signals:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(signals)
+    display_cols = [
+        "signal_type", "strike", "option_type",
+        "market_price", "fair_value",
+        "profit_ratio", "composite_score",
+        "probability_of_success", "position_size",
+        "risk_usd", "reward_usd",
+    ]
+    available = [c for c in display_cols if c in df.columns]
+    return df[available]
+
+
+# ---- Main entry point ----
+if st.session_state.data_loaded:
+    run_full_analysis()
