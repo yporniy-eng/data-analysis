@@ -1,0 +1,78 @@
+# Liquidity Impulse Detector - Configuration
+
+project:
+  name: "Liquidity Impulse Detector"
+  version: "1.0.0"
+
+data_collection:
+  symbols: ["BTC/USDT", "ETH/USDT"]
+  exchanges: ["binance", "bybit"]
+  ohlcv_timeframes: ["1h", "4h", "1d"]
+  backfill_days: 365
+  liquidations_lookback_hours: 48
+
+database:
+  clickhouse:
+    host: "localhost"
+    port: 8123
+    database: "liquidity_detector"
+    user: "default"
+    password: ""
+  redis:
+    host: "localhost"
+    port: 6379
+    db: 0
+
+mathematical_core:
+  options:
+    risk_free_rate: 0.053
+    day_count: 365
+  ewma:
+    initial_lambda: 0.94
+  correction:
+    use_kurtosis: true
+    use_skewness: true
+
+ml:
+  pca:
+    n_components: 10
+  clustering:
+    n_clusters: 5
+  retraining:
+    interval_days: 7
+    lookback_days: 90
+
+liquidations:
+  detection:
+    lookback_hours: 48
+    price_range_pct: 0.05
+    bin_size_pct: 0.001
+    z_score_percentile: 90
+
+signals:
+  option_scanner:
+    delta_min: 0.25
+    delta_max: 0.45
+    min_days_to_expiry: 7
+    max_days_to_expiry: 60
+  scoring:
+    min_profit_ratio: 1.5
+    min_composite_score: 0.6
+  position_sizing:
+    kelly_fraction: 0.25
+    max_single_trade_risk_pct: 0.02
+
+backtest:
+  initial_capital: 100000
+  commission_rate: 0.0004
+  stop_loss_pct: 0.50
+  max_hold_hours: 48
+
+dashboard:
+  host: "localhost"
+  port: 8501
+  refresh_interval_sec: 30
+
+logging:
+  level: "INFO"
+  file: "logs/app.log"
