@@ -225,7 +225,22 @@ def run_full_analysis():
     st.subheader("📈 График цены")
     chart_h = st.session_state.get("chart_height", 700)
     fig = build_price_chart(ohlcv, clusters, current_price, chart_height=chart_h)
-    st.plotly_chart(fig, use_container_width=True, key="price_chart")
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        key="price_chart",
+        config={
+            "scrollZoom": True,
+            "displayModeBar": True,
+            "modeBarButtonsToAdd": [
+                "drawline",
+                "drawopenpath",
+                "drawcircle",
+                "drawrect",
+                "eraseshape",
+            ],
+        },
+    )
 
     # ---- Signal generation ----
     st.subheader("💡 Торговые сигналы")
@@ -497,8 +512,8 @@ def build_price_chart(
         ),
         modebar=dict(
             add=[
-                "drawline",       # Draw trend lines
-                "eraseshape",     # Erase drawings
+                "drawline",
+                "eraseshape",
             ],
             remove=[
                 "lasso2d",
@@ -506,17 +521,7 @@ def build_price_chart(
                 "autoScale2d",
             ],
         ),
-        config=dict(
-            scrollZoom=True,          # Trackpad scroll to zoom
-            displayModeBar=True,       # Show modebar
-            modeBarButtonsToAdd=[
-                "drawline",
-                "drawopenpath",
-                "drawcircle",
-                "drawrect",
-                "eraseshape",
-            ],
-        ),
+        uirevision="price_chart",
     )
 
     return fig
