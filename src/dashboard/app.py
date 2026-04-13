@@ -72,6 +72,20 @@ with st.sidebar:
 
     st.divider()
 
+    # Chart size controls
+    st.subheader("📐 Размер графика")
+    chart_height = st.slider(
+        "Высота (px)",
+        min_value=400,
+        max_value=1200,
+        value=700,
+        step=50,
+        key="chart_height_slider",
+    )
+    st.session_state.chart_height = chart_height
+
+    st.divider()
+
     st.info(
         "💡 Нажмите **«Запустить анализ»** "
         "для загрузки данных и генерации сигналов.\n\n"
@@ -209,8 +223,9 @@ def run_full_analysis():
 
     # ---- Price chart ----
     st.subheader("📈 График цены")
-    fig = build_price_chart(ohlcv, clusters, current_price)
-    st.plotly_chart(fig, use_container_width=True)
+    chart_h = st.session_state.get("chart_height", 700)
+    fig = build_price_chart(ohlcv, clusters, current_price, chart_height=chart_h)
+    st.plotly_chart(fig, use_container_width=True, key="price_chart")
 
     # ---- Signal generation ----
     st.subheader("💡 Торговые сигналы")
@@ -380,13 +395,26 @@ def run_backtest(ohlcv, liqs, symbol, generator):
         st.dataframe(result["trades"], use_container_width=True, hide_index=True)
 
 
-def build_price_chart(ohlcv: pd.DataFrame, clusters: list, current_price: float):
-    """Build candlestick chart with liquidation clusters."""
+def build_price_chart(
+    ohlcv: pd.DataFrame,
+    clusters: list,
+    current_price: float,
+    chart_height: int = 700,
+):
+    """Build interactive candlestick chart with liquidation clusters.
+
+    Interactions:
+    - Scroll / trackpad pinch → zoom in/out
+    - Click + drag → pan (move around)
+    - Box select → zoom to selection
+    - Modebar buttons → reset, zoom, pan, screenshot
+    """
     fig = make_subplots(
         rows=2, cols=1,
         row_heights=[0.75, 0.25],
         shared_xaxes=True,
         vertical_spacing=0.03,
+        subplot_titles=("Price", "Volume"),
     )
 
     # Candlestick
@@ -398,24 +426,29 @@ def build_price_chart(ohlcv: pd.DataFrame, clusters: list, current_price: float)
             low=ohlcv["low"],
             close=ohlcv["close"],
             name="Price",
+            increasing=dict(line=dict(color="#26a69a"), fillcolor="#26a69a"),
+            decreasing=dict(line=dict(color="#ef5350"), fillcolor="#ef5350"),
         ),
         row=1, col=1,
     )
 
     # Liquidation cluster lines
-    colors_map = {"above": "red", "below": "green"}
+    colors_map = {"above": "rgba(255,0,0,0.7)", "below": "rgba(0,200,0,0.7)"}
     for cluster in clusters:
         fig.add_hline(
             y=cluster["price_center"],
             line_dash="dash",
             line_color=colors_map.get(cluster["position"], "gray"),
-            opacity=0.7,
+            line_width=2,
+            opacity=0.8,
             row=1, col=1,
             annotation_text=(
                 f"{'🔴' if cluster['position'] == 'above' else '🟢'} "
                 f"{cluster['distance_pct']:+.1%} | "
-                f"z={cluster['max_z_score']:.1f}"
+                f"z={cluster['max_z_score']:.1f} | "
+                f"${cluster['total_value']:,.0f}"
             ),
+            annotation_font=dict(size=11),
             annotation_position=(
                 "top left" if cluster["position"] == "above" else "bottom left"
             ),
@@ -423,7 +456,7 @@ def build_price_chart(ohlcv: pd.DataFrame, clusters: list, current_price: float)
 
     # Volume bars
     colors_vol = [
-        "green" if c >= o else "red"
+        "rgba(38,166,154,0.6)" if c >= o else "rgba(239,83,80,0.6)"
         for o, c in zip(ohlcv["open"], ohlcv["close"])
     ]
     fig.add_trace(
@@ -432,16 +465,58 @@ def build_price_chart(ohlcv: pd.DataFrame, clusters: list, current_price: float)
             y=ohlcv["volume"],
             marker_color=colors_vol,
             name="Volume",
-            opacity=0.6,
+            showlegend=False,
         ),
         row=2, col=1,
     )
 
+    # Interactive modebar configuration
     fig.update_layout(
-        height=700,
+        height=chart_height,
         xaxis_rangeslider_visible=False,
         showlegend=False,
         xaxis_title="",
+        dragmode="zoom",  # Default: scroll to zoom, drag to pan
+        hovermode="x unified",
+        xaxis=dict(
+            type="date",
+            showgrid=True,
+            gridwidth=1,
+            gridcolor="rgba(128,128,128,0.2)",
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridwidth=1,
+            gridcolor="rgba(128,128,128,0.2)",
+            domain=[0.25, 1.0],
+        ),
+        yaxis2=dict(
+            showgrid=True,
+            gridcolor="rgba(128,128,128,0.2)",
+            domain=[0.0, 0.22],
+        ),
+        modebar=dict(
+            add=[
+                "drawline",       # Draw trend lines
+                "eraseshape",     # Erase drawings
+            ],
+            remove=[
+                "lasso2d",
+                "select2d",
+                "autoScale2d",
+            ],
+        ),
+        config=dict(
+            scrollZoom=True,          # Trackpad scroll to zoom
+            displayModeBar=True,       # Show modebar
+            modeBarButtonsToAdd=[
+                "drawline",
+                "drawopenpath",
+                "drawcircle",
+                "drawrect",
+                "eraseshape",
+            ],
+        ),
     )
 
     return fig
