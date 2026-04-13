@@ -56,7 +56,7 @@ with st.sidebar:
         index=0,
     )
 
-    days_back = st.slider("Дней истории", 30, 365, 90, 30)
+    days_back = st.slider("Дней истории", 7, 365, 30, 7)
 
     st.divider()
 
@@ -96,15 +96,19 @@ with st.sidebar:
 # ---- Data loading (cached) ----
 @st.cache_data(ttl=600, show_spinner=False)
 def load_ohlcv_data(sym: str, tf: str, days: int) -> pd.DataFrame:
-    """Load OHLCV candlestick data."""
+    """Load OHLCV candlestick data (single fast request, max 1000 candles)."""
     collector = DataCollector(exchange_name="binance")
-    df = collector.fetch_ohlcv_history(sym, tf, days)
-    return df
+    # Single request - Binance returns up to 1000 candles
+    result = collector.fetch_ohlcv(sym, tf, limit=1000)
+    result["symbol"] = sym
+    result["exchange"] = "binance"
+    result["timeframe"] = tf
+    return result
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def load_liquidations(sym: str, limit: int = 1000) -> pd.DataFrame:
-    """Load liquidation data."""
+def load_liquidations(sym: str, limit: int = 500) -> pd.DataFrame:
+    """Load recent liquidation data."""
     collector = DataCollector(exchange_name="binance")
     sym_raw = sym.replace("/", "")
     df = collector.fetch_liquidations(sym_raw, limit=limit)
@@ -116,15 +120,6 @@ if "data_loaded" not in st.session_state:
     st.session_state.data_loaded = False
 
 
-def _run_analysis(symbol, timeframe, days_back):
-    """Store params and rerun to trigger analysis."""
-    st.session_state.selected_symbol = symbol
-    st.session_state.selected_timeframe = timeframe
-    st.session_state.selected_days = days_back
-    st.session_state.data_loaded = True
-    st.rerun()
-
-
 if not st.session_state.data_loaded:
     st.markdown("---")
 
@@ -134,14 +129,29 @@ if not st.session_state.data_loaded:
         st.subheader("🚀 Быстрый старт")
         st.markdown("""
 1. Выберите инструмент в sidebar
-2. Выберите таймфрейм и глубину истории
-3. Нажмите **«Запустить анализ»**
+2. Нажмите **«Запустить анализ»**
 
-Данные загружаются с Binance (публичные API, без ключей).
+Данные загружаются с Binance (1000 свечей, ~5-10 сек).
         """)
 
         if st.button("🚀 Запустить анализ", type="primary", use_container_width=True):
-            _run_analysis(symbol, timeframe, days_back)
+            with st.spinner("⏳ Загрузка OHLCV данных с Binance..."):
+                ohlcv = load_ohlcv_data(symbol, timeframe, days_back)
+
+            if ohlcv.empty:
+                st.error("Не удалось загрузить данные. Попробуйте ещё раз.")
+                st.stop()
+
+            with st.spinner("⏳ Загрузка данных о ликвидациях..."):
+                liqs = load_liquidations(symbol, limit=500)
+
+            st.session_state.ohlcv = ohlcv
+            st.session_state.liquidations = liqs
+            st.session_state.selected_symbol = symbol
+            st.session_state.selected_timeframe = timeframe
+            st.session_state.selected_days = days_back
+            st.session_state.data_loaded = True
+            st.rerun()
 
     with col2:
         st.subheader("📋 Что показывает приложение")
